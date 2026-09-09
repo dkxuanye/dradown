@@ -400,7 +400,8 @@ cmd_ipsw() {
         * ) err "目标版本须在 5.0 - 9.3.6 范围内 (DRA v6 支持范围)";;
     esac
     local tb="$(resolve_build "$tv")"
-    log "目标: $DEV $tv ($tb), base: $BASE_VERS ($BASE_BUILD)"
+    log "构建固件: 目标版本 $tv ($tb) / 基础版本 $BASE_VERS ($BASE_BUILD, 引导链, 自动)"
+    echo "  (基础版本 $BASE_VERS 仅用于刷机引导链; 刷完后设备运行的是目标版本 $tv)"
 
     local t_ipsw="$(ensure_ipsw "$tv" "$tb")"
     local b_ipsw="$(ensure_ipsw "$BASE_VERS" "$BASE_BUILD")"
@@ -563,31 +564,42 @@ battery_images() {
 
 # ---------- 设备检测 ----------
 cmd_info() {
-    log "检测设备 ..."
+    echo "设备检测:"
     if "$BIN/ideviceinfo" -k ProductType >/dev/null 2>&1; then
         local type="$("$BIN/ideviceinfo" -k ProductType)"
         local vers="$("$BIN/ideviceinfo" -k ProductVersion)"
         local ecid="$("$BIN/ideviceinfo" -k UniqueChipID)"
-        echo "  设备: $type  版本: $vers  ECID: $ecid"
-        if [[ "$type" != "$DEV" ]]; then
-            warn "设备类型不是 $DEV, 本工具仅支持 iPhone 4S"
-        elif [[ "$vers" != "$BASE_VERS" ]]; then
-            warn "设备当前是 iOS $vers (非 $BASE_VERS)"
-            warn "刷 7.x/8.x/9.x/5.x 目标: pwned DFU 下与当前版本无关, 可直接刷"
-            warn "仅在目标为 6.1.3 时需要设备当前就在 6.1.3 (exploit 免签引导依赖漏洞 iBoot)"
+        echo "  设备:     iPhone 4S ($type)  ECID: $ecid"
+        echo "  ─────────────────────────────────────────────"
+        echo "  当前系统: iOS $vers   (设备现在跑的系统)"
+        echo "  基础版本: iOS $BASE_VERS  (自动处理, 无需你操作)"
+        echo "            └ 刷机时作为引导链打包进固件, 不是要刷的系统"
+        echo "  目标版本: 由你选择 — 在菜单 [2] 或 [4] 里输入想刷的版本"
+        echo "  ─────────────────────────────────────────────"
+        if [[ "$vers" == "$BASE_VERS" ]]; then
+            echo "  状态: ✅ 可刷写任意目标版本 (5.0-9.3.6); 6.x 目标带免签引导"
         else
-            log "设备在 $BASE_VERS, 满足 DRA v6 前提 ✓"
+            echo "  状态: ✅ 可刷写任意目标版本 (5.0-9.3.6), 与当前系统无关"
         fi
     elif "$BIN/irecovery" -q 2>/dev/null | grep -q CPID; then
         local q="$("$BIN/irecovery" -q)"
-        echo "$q" | grep -E "CPID|MODE|IBOOT|PWND"
-        local iboot="$(echo "$q" | grep IBOOT | cut -c7-)"
-        if [[ -n "$iboot" && "$iboot" != "$EXPECTED_IBOOT" ]]; then
-            warn "iBoot 版本 $iboot 与 $BASE_VERS 的 $EXPECTED_IBOOT 不符, 请确认设备当前系统!"
-        fi
-        warn "设备在 DFU/Recovery 模式, 无法读取当前系统版本"
+        local mode="$(echo "$q" | grep '^MODE' | cut -c7-)"
+        local pwnd="$(echo "$q" | grep -i '^PWND' | cut -c7-)"
+        echo "  模式:   ${mode:-未知}${pwnd:+ (已 pwn: $pwnd)}"
+        case "$mode" in
+            *DFU* )
+                if [[ -n "$pwnd" ]]; then
+                    echo "  状态:   ✅ 可直接刷入 — 运行 [3]/[4] 即可"
+                else
+                    echo "  状态:   DFU 模式 (未 pwn) — 请先用 Arduino 工具 pwn, 再运行 [3]/[4]"
+                fi
+            ;;
+            *Recovery* )
+                echo "  状态:   恢复模式 — 可直接运行 [3]/[4] 刷入"
+            ;;
+        esac
     else
-        err "未检测到设备。请用数据线连接 iPhone 4S (普通模式或恢复模式)"
+        err "未检测到设备。请用数据线连接 iPhone 4S 后重试"
     fi
 }
 
@@ -809,23 +821,32 @@ cmd_menu() {
     while true; do
         echo
         echo "==============================================="
-        echo "   dradown — iPhone 4S 免SHSH全版本刷写 ($DEV)"
+        echo "   iPhone 4S 免SHSH全版本刷写工具 (DRA v6)"
         echo "==============================================="
-        echo "  [1] 检测设备与系统版本"
-        echo "  [2] 构建目标版本固件"
-        echo "  [3] 刷入 (选择已构建的固件)"
-        echo "  [4] 一键模式: 构建 + 刷入"
-        echo "  [5] 重新下载工具/资源 (setup)"
-        echo "  [0] 退出"
+        echo "  概念: 目标版本 = 你想刷成的系统 (5.0-9.3.6 任选)"
+        echo "        基础版本 = iOS $BASE_VERS (刷机引导链, 自动处理)"
+        echo "  前提: 每次刷机前需用 Arduino 工具对设备做一次 pwn"
+        echo "-----------------------------------------------"
+        echo "  操作流程:"
+        echo "   [1] 插上设备, 先检测 (看是否被识别)"
+        echo "   [2] 选择并构建目标版本固件 (首次含下载, 较慢)"
+        echo "   [3] 设备进DFU + Arduino pwn 后, 刷入已构建固件"
+        echo "   [4] 懒人模式: 输入目标版本, 一条龙构建+刷入"
+        echo "-----------------------------------------------"
+        echo "  其他: [5] 重新下载工具  [0] 退出"
         echo "==============================================="
         printf "请输入编号后回车: "
         local choice
         read -r choice || { echo; exit 0; }   # stdin EOF 时退出菜单 (防止死循环)
         case "$choice" in
             1) cmd_info; echo; echo "(按回车返回菜单)"; read -r;;
-            2) printf "请输入目标版本 (例: 8.4.1 / 7.1.2 / 6.1.3 / 5.1.1 / 9.3.5): "; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; echo "(按回车返回菜单)"; read -r;;
+            2) echo "构建固件 = 准备刷机包。需先选择【目标版本】(要刷成的系统):"
+               echo "  可选: 5.1.1 / 6.1.3 / 7.1.2 / 8.4.1 / 9.3.5 / 9.3.6 ..."
+               printf "目标版本: "; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; echo "(按回车返回菜单)"; read -r;;
             3) cmd_restore_menu;;
-            4) printf "请输入目标版本: "; read -r v; [[ -n "$v" ]] && cmd_auto "$v"; echo "(按回车返回菜单)"; read -r;;
+            4) echo "一键刷机: 输入【目标版本】(要刷成的系统)"
+               echo "  例: 想刷成 7.1.2 就输入 7.1.2 (基础版本 6.1.3 会自动处理)"
+               printf "目标版本: "; read -r v; [[ -n "$v" ]] && cmd_auto "$v"; echo "(按回车返回菜单)"; read -r;;
             5) cmd_setup; echo "(按回车返回菜单)"; read -r;;
             0|q|Q) exit 0;;
             *) echo "无效输入";;
