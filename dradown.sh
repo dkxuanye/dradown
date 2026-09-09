@@ -42,6 +42,7 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 # CALLER_CWD 用于把用户传入的相对路径参数还原为绝对路径
 CALLER_CWD="$PWD"
 cd "$DIR" || { echo "无法进入项目目录: $DIR" >&2; exit 1; }
+mkdir -p "$DIR/logs"   # 日志目录必须先于一切日志重定向创建
 BIN="$DIR/bin"
 RES="$DIR/resources"
 KEYS="$DIR/keys"

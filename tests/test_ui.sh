@@ -50,6 +50,7 @@ check "direct CLI ipsw path runs without unbound-variable crash" bash -c 'grep -
 
 # 健壮性: 工作目录固定 / 下载完整性 / 上游锁定
 check "script pins cwd to project dir" bash -c 'grep -q "^cd \"\$DIR\"" "$1"' _ "$SCRIPT"
+check "logs dir is created before first log redirect" bash -c 'm=$(grep -n "mkdir -p \"\$DIR/logs\"" "$1" | head -1 | cut -d: -f1); r=$(grep -n "logs/pwn-" "$1" | head -1 | cut -d: -f1); [[ -n "$m" && -n "$r" && "$m" -lt "$r" ]]' _ "$SCRIPT"
 check "curl downloads via .part temp file" bash -c 'grep -q "ipsw.part" "$1"' _ "$SCRIPT"
 check "LIK upstream is pinned to a commit" bash -c 'grep -qE "LIK_COMMIT=\"[0-9a-f]{40}\"" "$1"' _ "$SCRIPT"
 check "sha256 manifest verifies all bundled files" bash -c 'cd "$1" && shasum -a 256 -c sha256sums.txt >/dev/null 2>&1' _ "$ROOT"
