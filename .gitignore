@@ -1,0 +1,19 @@
+# 设备/隐私数据 — 严禁分享
+shsh/
+saved/
+work/
+*.lock
+.ipswdir/
+
+# Apple 版权固件与构建产物 — 严禁分享
+ipsw/
+*.ipsw
+*.bbfw
+
+# 临时
+*.log
+.DS_Store
+# idevicerestore 工作缓存目录
+iPhone4,1_*/
+# 密钥缓存 (按需自动下载)
+keys/
