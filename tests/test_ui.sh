@@ -40,5 +40,14 @@ check "auto path does not bypass confirmation" bash -c '! grep -q "DRADOWN_YES=1
 check "lock is re-entrant for the same process" bash -c 'grep -q "lock_pid" "$1" && grep -q "return 0" "$1"' _ "$SCRIPT"
 check "download reports a known or unknown total clearly" bash -c 'grep -q "下载进度" "$1"' _ "$SCRIPT"
 
+# bash 3.2 + set -u 回归防护
+check "no bare \$VAR directly before non-ASCII (bash 3.2 misparse)" bash -c '! grep -qE "\$[A-Za-z_][A-Za-z0-9_]*[^ -~]" "$1"' _ "$SCRIPT"
+check "set -u flags have defaults" bash -c 'grep -q "DRADOWN_GUIDED:=0" "$1" && grep -q "DRADOWN_CONFIRMED:=0" "$1" && grep -q "FETCH_QUIET:=0" "$1"' _ "$SCRIPT"
+check "optional positional params (\$5+) use :- defaults" bash -c '! grep -qE "=\"\\\$[5-9]\"" "$1"' _ "$SCRIPT"
+check "empty-array expansion is guarded" bash -c 'grep -q "JBFiles\[@\]+" "$1"' _ "$SCRIPT"
+
+ipsw_usage="$(bash "$SCRIPT" ipsw 2>&1 || true)"
+check "direct CLI ipsw path runs without unbound-variable crash" bash -c 'grep -q "用法" <<< "$1" && ! grep -q "unbound variable" <<< "$1"' _ "$ipsw_usage"
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

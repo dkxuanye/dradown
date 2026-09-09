@@ -14,6 +14,7 @@
 #   ./dradown.sh clean            清理工作缓存
 
 set -o pipefail
+set -u
 
 # ---------- 固定参数 (iPhone 4S / DRA v6) ----------
 DEV="iPhone4,1"
@@ -29,7 +30,11 @@ KEYS_RAW="https://raw.githubusercontent.com/LukeZGD/Legacy-iOS-Kit-Keys/$KEYS_CO
 IPSW_ME="https://api.ipsw.me/v4/device/$DEV"
 ALL_FLASH="Firmware/all_flash/all_flash.${MODEL}.production"
 DRA_BOOT_ARGS="pio-error=0 debug=0x2014e serial=3"
-EXPECTED_IBOOT="iBoot-3582.4"   # iPhone 4S iOS 6.1.3 的 iBoot 版本
+
+# set -u 兼容: 向导/确认/静默标记在直接 CLI 调用时未赋值, 先给默认值
+: "${DRADOWN_GUIDED:=0}"
+: "${DRADOWN_CONFIRMED:=0}"
+: "${FETCH_QUIET:=0}"
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN="$DIR/bin"
@@ -74,7 +79,7 @@ ui_help() {
 这是一台 iPhone 4S 的刷机向导。
 
 目标版本 = 刷完后设备要运行的 iOS 版本。
-基础版本 = iOS $BASE_VERS，只用于准备刷机引导链，由工具自动处理。
+基础版本 = iOS ${BASE_VERS}，只用于准备刷机引导链，由工具自动处理。
 
 开始前准备：
   1. 备份设备上的重要数据（刷机会清除全部内容）
@@ -311,7 +316,7 @@ comp_name() { # <BuildManifest.plist> <bm_key> <build.json> <keys_image>
 
 # ---------- Info.plist 生成 ----------
 emit_keys_entry() { # <comp名> <build.json> <keys_image> <File路径> [PatchTrue] [DecryptPath] [extra: NewiBoot->IV/Key]
-    local comp="$1" kj="$2" img="$3" file="$4" patch="$5" dpath="$6" iv key
+    local comp="$1" kj="$2" img="$3" file="$4" patch="${5:-}" dpath="${6:-}" iv key
     echo -n "<key>$comp</key><dict><key>File</key><string>$file</string>"
     iv="$(key_field "$kj" "$img" "iv")"; key="$(key_field "$kj" "$img" "key")"
     if [[ -n "$iv" ]]; then
@@ -324,7 +329,7 @@ emit_keys_entry() { # <comp名> <build.json> <keys_image> <File路径> [PatchTru
 }
 
 emit_path_entry() { # <comp名> <File路径(不含前缀)> [IV] [Key]
-    local comp="$1" file="$2" iv="$3" key="$4"
+    local comp="$1" file="$2" iv="${3:-}" key="${4:-}"
     echo -n "<key>$comp</key><dict><key>File</key><string>$ALL_FLASH/$file</string>"
     [[ -n "$iv" ]] && echo -n "<key>IV</key><string>$iv</string><key>Key</key><string>$key</string>"
     echo "</dict>"
@@ -536,7 +541,7 @@ cmd_ipsw() {
     esac
     local tb="$(resolve_build "$tv")"
     log "构建固件: 目标版本 $tv ($tb) / 基础版本 $BASE_VERS ($BASE_BUILD, 引导链, 自动)"
-    echo "  （基础版本 $BASE_VERS 仅用于刷机引导链；刷完后设备运行的是目标版本 $tv）"
+    echo "  （基础版本 $BASE_VERS 仅用于刷机引导链；刷完后设备运行的是目标版本 ${tv}）"
 
     if [[ $DRADOWN_GUIDED == 1 ]]; then
         ui_stage 1 '准备官方固件'
@@ -597,10 +602,10 @@ cmd_ipsw() {
     mkdir -p "$DIR/logs"
     if [[ $DRADOWN_GUIDED == 1 ]]; then
         "$BIN/powdersn0w" "../ipsw/${DEV}_${tv}_${tb}_Restore.ipsw" temp.ipsw \
-            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]} >"$build_log" 2>&1
+            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]+"${JBFiles[@]}"} >"$build_log" 2>&1
     else
         "$BIN/powdersn0w" "../ipsw/${DEV}_${tv}_${tb}_Restore.ipsw" temp.ipsw \
-            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]}
+            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]+"${JBFiles[@]}"}
     fi
     [[ -s temp.ipsw ]] || { [[ $DRADOWN_GUIDED == 1 ]] && ui_failure '创建刷机固件' "$build_log"; err "powdersn0w 构建失败 (未生成 temp.ipsw)"; }
     [[ $DRADOWN_GUIDED == 1 ]] && printf '  刷机固件已创建。\n'
@@ -767,35 +772,32 @@ cmd_info() {
 # iOS 6 票据不含 ApNonce, 可直接用于目标版本组件。
 save_dra_blob() { # <目标版本>
     local tv="$1"
-    # ECID 优先从已有票据文件名推导 (票据与目标版本无关); 无则从设备读取
-    local ecid
-    local any_ticket="$(ls -t shsh/*.shsh 2>/dev/null | head -1)"
-    if [[ -n "$any_ticket" ]]; then
-        ecid="$(basename "$any_ticket" | cut -d- -f1)"
-        log "从已存票据推导 ECID: $ecid"
-    else
-        ecid="$("$BIN/irecovery" -q 2>/dev/null | grep -i '^ECID' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]')"
-        [[ -z "$ecid" ]] && ecid="$("$BIN/ideviceinfo" -k UniqueChipID 2>/dev/null | tr -d '[:space:]')"
+    # ECID 必须来自当前连接的设备（普通模式或恢复模式），确保票据与设备绑定
+    local ecid="$("$BIN/ideviceinfo" -k UniqueChipID 2>/dev/null | tr -d '[:space:]')"
+    if [[ -z "$ecid" ]]; then
+        local raw="$("$BIN/irecovery" -q 2>/dev/null | grep -i '^ECID' | head -1 | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '[:space:]')"
+        if [[ -n "$raw" ]]; then
+            # irecovery 返回十六进制
+            ecid="$(( 16#${raw#0x} ))"
+        fi
     fi
-    # 归一化为十进制 (idevicerestore 按十进制 ECID 查找票据文件)
+    if [[ -z "$ecid" ]]; then
+        # 尝试从已有票据推导 ECID
+        local any_ticket="$(ls -t shsh/*.shsh 2>/dev/null | head -1)"
+        if [[ -n "$any_ticket" ]]; then
+            ecid="$(basename "$any_ticket" | cut -d- -f1)"
+            log "设备不可读, 从已有票据推导 ECID: $ecid"
+        fi
+    fi
     if [[ -n "$ecid" && "$ecid" == *[a-fA-Fx]* ]]; then
         ecid="$(( 16#${ecid#0x} ))"
     fi
+    [[ -z "$ecid" ]] && err "无法确定设备 ECID, 请连接设备后重试"
+
     mkdir -p shsh
-    local dst
-    if [[ -n "$ecid" ]]; then
-        dst="shsh/${ecid}-${DEV}-${tv}.shsh"
-    else
-        # 设备不可读时, 复用已有的票据文件
-        dst="$(ls -t shsh/*-${DEV}-${tv}.shsh 2>/dev/null | head -1)"
-        if [[ -s "$dst" ]]; then
-            log "设备不可读, 复用已有票据: $dst"
-            return 0
-        fi
-        err "无法读取设备 ECID 且无已存票据, 请连接设备"
-    fi
+    local dst="shsh/${ecid}-${DEV}-${tv}.shsh"
     if [[ ! -s "$dst" ]]; then
-        log "保存 base ${BASE_VERS} OTA 票据 (tsschecker) ..."
+        log "保存 base ${BASE_VERS} OTA 票据 (tsschecker, 需要网络) ..."
         rm -f ./${ecid}_*.shsh* 2>/dev/null
         "$BIN/tsschecker" -d "$DEV" -i "$BASE_VERS" -e "$ecid" \
             -m "$RES/manifest/BuildManifest_${DEV}_${BASE_VERS}.plist" \
@@ -905,7 +907,11 @@ cmd_restore() {
         fi
     done
     printf '\n'
-    [[ -z "$pwned" ]] && err "10 分钟内未检测到 pwn。请重新进入 DFU 后重试。"
+    if [[ -z "$pwned" ]]; then
+        printf '\n  刷入失败: 10 分钟内未检测到 pwned DFU。\n'
+        printf '  请确认: Arduino 工具正常工作 → 重新进 DFU → 重新 pwn → 再重试。\n'
+        return 1
+    fi
     log "已检测到设备，正在继续 ..."
     if [[ $DRADOWN_GUIDED == 1 ]]; then
         ui_stage 4 '刷入 iOS'
@@ -959,16 +965,12 @@ cmd_restore() {
     # 刷入结束后恢复 macOS USB 设备代理
     killall -CONT AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
     if [[ $ret -eq 0 ]]; then
-        if [[ $DRADOWN_GUIDED == 1 ]]; then
-            ui_success "$tv"
-        else
-            log "刷入流程结束。设备重启时 DRA exploit 会自动触发 (boot-partition=2)"
-            log "如设备卡在恢复模式: 重启一次即可; 如需关闭 exploit, 可清空 NVRAM (boot-partition)"
-        fi
+        ui_success "$tv"
+        log "如需关闭 exploit: 使用 LIK 工具清空 NVRAM (boot-partition)"
     else
-        local restore_log="$DIR/logs/restore-${tv}-${tb2}.log"
-        ui_failure '刷入设备' "$restore_log"
-        warn "详细工具输出已保存到: $restore_log"
+        ui_failure "刷入 iOS $tv" "$restore_log"
+        warn "返回码 ${ret}。可重刷官方 $BASE_VERS IPSW 救回后重试。"
+        return 1
     fi
 }
 
@@ -1036,7 +1038,7 @@ cmd_guided_restore() {
     local target="$1"
     ui_title '准备刷机'
     echo "目标系统: iOS $target"
-    echo "基础版本: iOS $BASE_VERS（自动准备，仅用于刷机引导）"
+    echo "基础版本: iOS ${BASE_VERS}（自动准备，仅用于刷机引导）"
     echo "刷完后设备运行: iOS $target"
     echo
     echo '这次操作会清除 iPhone 上的全部内容。'
@@ -1106,7 +1108,7 @@ cmd_restore_menu() {
     fi
 }
 
-case "$1" in
+case "${1:-}" in
     setup)   cmd_setup;;
     info)    cmd_info;;
     keys)    shift; cmd_keys "$@";;
