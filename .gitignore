@@ -17,3 +17,5 @@ ipsw/
 iPhone4,1_*/
 # 密钥缓存 (按需自动下载)
 keys/
+CustomP6/
+bin.bak/

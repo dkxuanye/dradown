@@ -24,19 +24,32 @@
 
 - iPhone 4S（iPhone4,1, n94ap），需通过 iOS 6.1.3 兼容测试（能刷入并开机 6.1.3）
 - **checkm8-a5 pwn 硬件**：Arduino + USB Host Shield 或 Raspberry Pi Pico（见 LIK wiki: checkm8-a5）——每次刷机前 pwn 一次
-- macOS x86_64（工具二进制来自 Legacy-iOS-Kit macOS 构建）
+- macOS **10.13 (High Sierra) 或更高**（全部工具实测最低要求 10.11/10.12 ✓；脚本兼容系统自带 bash 3.2）
 - 数据线（建议直插 Mac，不用 Hub）
 
 ## 快速开始
 
+### 新手方式（双击）
+
+双击 **`双击运行.command`** 打开图形化菜单（按编号操作，无需记命令）：
+
+    [1] 检测设备与系统版本
+    [2] 构建目标版本固件
+    [3] 刷入（选择已构建的固件）
+    [4] 一键模式：构建 + 刷入
+
+> 首次从网络下载的 .command 会被 macOS 拦截——**右键点它 → 打开**（只需一次），
+> 或终端执行：`xattr -d com.apple.quarantine 双击运行.command`
+
+### 命令方式
+
     ./dradown.sh setup              # 下载全部工具与资源
+    ./dradown.sh info               # 检测设备与 iOS 版本
     ./dradown.sh ipsw 8.4.1         # 构建目标固件（自动下载固件+密钥+打包+修复）
     # 设备进 DFU → Arduino pwn →
-    ./dradown.sh restore            # 自动检测新鲜 pwn 并刷入（等 10 分钟窗口）
-
-或一键（构建缺则自动 + 全自动确认）：
-
-    ./dradown.sh auto 7.1.2         # 构建缺则自动 + 等待你的 pwn + 自动刷入
+    ./dradown.sh restore iPhone4,1_8.4.1_12H321_CustomP6.ipsw
+                                    # 刷入（明确指定固件，防呆；等待 Arduino pwn）
+    ./dradown.sh auto 7.1.2         # 一键：构建(缺则) → 等待 pwn → 自动刷入
 
 ## 工作机制
 

@@ -802,6 +802,61 @@ cmd_auto() {
     DRADOWN_YES=1 cmd_restore "$auto_ipsw"
 }
 
+# ---------- 新手菜单 (双击启动默认进入) ----------
+cmd_menu() {
+    while true; do
+        echo
+        echo "==============================================="
+        echo "   dradown — iPhone 4S 免SHSH全版本刷写 ($DEV)"
+        echo "==============================================="
+        echo "  [1] 检测设备与系统版本"
+        echo "  [2] 构建目标版本固件"
+        echo "  [3] 刷入 (选择已构建的固件)"
+        echo "  [4] 一键模式: 构建 + 刷入"
+        echo "  [5] 重新下载工具/资源 (setup)"
+        echo "  [0] 退出"
+        echo "==============================================="
+        printf "请输入编号后回车: "
+        local choice
+        read -r choice
+        case "$choice" in
+            1) cmd_info; echo; echo "(按回车返回菜单)"; read -r;;
+            2) printf "请输入目标版本 (例: 8.4.1 / 7.1.2 / 6.1.3 / 5.1.1 / 9.3.5): "; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; echo "(按回车返回菜单)"; read -r;;
+            3) cmd_restore_menu;;
+            4) printf "请输入目标版本: "; read -r v; [[ -n "$v" ]] && cmd_auto "$v"; echo "(按回车返回菜单)"; read -r;;
+            5) cmd_setup; echo "(按回车返回菜单)"; read -r;;
+            0|q|Q) exit 0;;
+            *) echo "无效输入";;
+        esac
+    done
+}
+
+# 刷入菜单: 自动列出固件, 单个直接选, 多个编号选择
+cmd_restore_menu() {
+    local all_ipsvs=("$DIR"/${DEV}_*_CustomP6.ipsw)
+    local list=() i
+    for i in "${all_ipsvs[@]}"; do [[ -s "$i" ]] && list+=("$i"); done
+    if [[ ${#list[@]} -eq 0 ]]; then
+        echo "还没有已构建的固件。请先选 [2] 构建固件。"
+        return
+    fi
+    if [[ ${#list[@]} -eq 1 ]]; then
+        cmd_restore "${list[0]}"
+        return
+    fi
+    echo "请选择要刷入的固件:"
+    local n=1
+    for f in "${list[@]}"; do echo "  [$n] $(basename "$f")"; n=$((n+1)); done
+    printf "输入编号: "
+    local pick
+    read -r pick
+    if [[ "$pick" =~ ^[0-9]+$ && $pick -ge 1 && $pick -le ${#list[@]} ]]; then
+        cmd_restore "${list[$((pick-1))]}"
+    else
+        echo "无效选择"
+    fi
+}
+
 case "$1" in
     setup)   cmd_setup;;
     info)    cmd_info;;
@@ -809,6 +864,7 @@ case "$1" in
     ipsw)    shift; cmd_ipsw "$@";;
     auto)    shift; cmd_auto "$@";;
     restore) shift; cmd_restore "$@";;
+    ""|menu) cmd_menu;;
     clean)   cmd_clean;;
     *) sed -n '2,16p' "$0";;
 esac
