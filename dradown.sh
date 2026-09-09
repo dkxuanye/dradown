@@ -572,7 +572,9 @@ cmd_info() {
         if [[ "$type" != "$DEV" ]]; then
             warn "设备类型不是 $DEV, 本工具仅支持 iPhone 4S"
         elif [[ "$vers" != "$BASE_VERS" ]]; then
-            err "设备当前是 iOS $vers, DRA v6 要求设备必须已在 $BASE_VERS!"
+            warn "设备当前是 iOS $vers (非 $BASE_VERS)"
+            warn "刷 7.x/8.x/9.x/5.x 目标: pwned DFU 下与当前版本无关, 可直接刷"
+            warn "仅在目标为 6.1.3 时需要设备当前就在 6.1.3 (exploit 免签引导依赖漏洞 iBoot)"
         else
             log "设备在 $BASE_VERS, 满足 DRA v6 前提 ✓"
         fi
@@ -818,7 +820,7 @@ cmd_menu() {
         echo "==============================================="
         printf "请输入编号后回车: "
         local choice
-        read -r choice
+        read -r choice || { echo; exit 0; }   # stdin EOF 时退出菜单 (防止死循环)
         case "$choice" in
             1) cmd_info; echo; echo "(按回车返回菜单)"; read -r;;
             2) printf "请输入目标版本 (例: 8.4.1 / 7.1.2 / 6.1.3 / 5.1.1 / 9.3.5): "; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; echo "(按回车返回菜单)"; read -r;;
