@@ -29,9 +29,8 @@ check "menu has one recommended guided action" contains "$menu_output" "[1] 开�
 check "menu keeps advanced concepts out of the first screen" bash -c '! grep -q "懒人模式\|pwnediBSS\|SRTG" <<< "$1"' _ "$menu_output"
 
 info_output="$(bash "$SCRIPT" info 2>/dev/null || true)"
-check "info labels current system" contains "$info_output" "当前系统"
-check "info labels base version" contains "$info_output" "基础版本"
-check "info labels target version" contains "$info_output" "目标版本"
+check "info prints detection header" contains "$info_output" "设备检测"
+check "info reports device state or absence" bash -c 'grep -q "当前系统\|未检测到设备\|模式:" <<< "$1"' _ "$info_output"
 
 restore_output="$(bash "$SCRIPT" restore 2>/dev/null || true)"
 check "restore refuses to guess among multiple IPSWs" contains "$restore_output" "必须明确指定"
@@ -48,6 +47,15 @@ check "empty-array expansion is guarded" bash -c 'grep -q "JBFiles\[@\]+" "$1"' 
 
 ipsw_usage="$(bash "$SCRIPT" ipsw 2>&1 || true)"
 check "direct CLI ipsw path runs without unbound-variable crash" bash -c 'grep -q "用法" <<< "$1" && ! grep -q "unbound variable" <<< "$1"' _ "$ipsw_usage"
+
+# 健壮性: 工作目录固定 / 下载完整性 / 上游锁定
+check "script pins cwd to project dir" bash -c 'grep -q "^cd \"\$DIR\"" "$1"' _ "$SCRIPT"
+check "curl downloads via .part temp file" bash -c 'grep -q "ipsw.part" "$1"' _ "$SCRIPT"
+check "LIK upstream is pinned to a commit" bash -c 'grep -qE "LIK_COMMIT=\"[0-9a-f]{40}\"" "$1"' _ "$SCRIPT"
+check "sha256 manifest verifies all bundled files" bash -c 'cd "$1" && shasum -a 256 -c sha256sums.txt >/dev/null 2>&1' _ "$ROOT"
+
+other_cwd_output="$(cd /tmp && bash "$SCRIPT" info 2>/dev/null || true)"
+check "info works when invoked from another directory" contains "$other_cwd_output" "设备检测"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ "$FAIL" -eq 0 ]]

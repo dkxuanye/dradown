@@ -25,7 +25,8 @@ BASE_VERS="6.1.3"
 BASE_BUILD="10B329"
 EXPLOIT_PATH="src/target/n94/10B329/exploit"
 KEYS_COMMIT="af6bf5934dc61ed557a967a3f42ab7fb8ed8c45e"
-LIK_RAW="https://raw.githubusercontent.com/LukeZGD/Legacy-iOS-Kit/main"
+LIK_COMMIT="0f05c64974d37c538b9a4e6eac8840333b3e66dd"
+LIK_RAW="https://raw.githubusercontent.com/LukeZGD/Legacy-iOS-Kit/$LIK_COMMIT"
 KEYS_RAW="https://raw.githubusercontent.com/LukeZGD/Legacy-iOS-Kit-Keys/$KEYS_COMMIT"
 IPSW_ME="https://api.ipsw.me/v4/device/$DEV"
 ALL_FLASH="Firmware/all_flash/all_flash.${MODEL}.production"
@@ -37,6 +38,10 @@ DRA_BOOT_ARGS="pio-error=0 debug=0x2014e serial=3"
 : "${FETCH_QUIET:=0}"
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
+# 脚本内大量使用相对路径 (work/, shsh/, ../../ipsw), 必须固定 cwd 到项目目录;
+# CALLER_CWD 用于把用户传入的相对路径参数还原为绝对路径
+CALLER_CWD="$PWD"
+cd "$DIR" || { echo "无法进入项目目录: $DIR" >&2; exit 1; }
 BIN="$DIR/bin"
 RES="$DIR/resources"
 KEYS="$DIR/keys"
@@ -137,10 +142,20 @@ ui_zip() {
     fi
 }
 
+# 下载后对照 sha256sums.txt 校验 (仅校验清单内条目; keys 等清单外文件直接通过)
+verify_download() { # <file>
+    local rel="${1#$DIR/}" expected actual
+    expected="$(awk -v f="$rel" '$2 == f {print $1}' "$DIR/sha256sums.txt" 2>/dev/null)"
+    [[ -z "$expected" ]] && return 0
+    actual="$(shasum -a 256 "$1" | cut -d' ' -f1)"
+    [[ "$actual" == "$expected" ]] || { rm -f "$1"; err "校验失败: $rel (与锁定版本不符, 已删除)"; }
+}
+
 fetch() { # fetch <url> <file>
     [[ -s "$2" ]] && return 0
     [[ $FETCH_QUIET == 1 ]] || log "准备 $(basename "$2") ..."
     curl -fsSL -o "$2" "$1" || err "下载失败，请检查网络后重试"
+    verify_download "$2"
 }
 
 ui_download_group() {
@@ -221,19 +236,23 @@ ensure_ipsw() { # <vers> <build> -> echo path
         clen="$(curl -sIL --max-time 20 "$url" | awk -F': ' 'tolower($1)=="content-length"{n=$2; gsub(/\r/,"",n); print n}' | tail -1)"
         [[ "$clen" =~ ^[0-9]+$ ]] && total="$clen"
         log "开始下载 $DEV $1 ($2) 官方固件 (共 $((total/1048576)) MB), 请勿断开网络 ..."
+        # curl 分支先下载到 .part, 完成后再改名, 避免中断留下的残缺文件被当成完整固件复用
+        local dlfile="$p.ipsw"
         if command -v aria2c >/dev/null; then
             aria2c --ca-certificate=/etc/ssl/cert.pem -x8 -s8 -k1M --file-allocation=none -q \
                 -o "$(basename "$p").ipsw" -d "$(dirname "$p")" "$url" &
             local apid=$!
         else
-            curl -sL -o "$p.ipsw" "$url" &
+            dlfile="$p.ipsw.part"
+            rm -f "$dlfile"
+            curl -sL -o "$dlfile" "$url" &
             local apid=$!
         fi
         # 进度显示: 每 5 秒打印一次百分比 (aria2c 后台运行)
         local have=0 pct=0 sec=0
         while kill -0 "$apid" 2>/dev/null; do
             sleep 5
-            have="$(stat -f%z "$p.ipsw" 2>/dev/null || echo 0)"
+            have="$(stat -f%z "$dlfile" 2>/dev/null || echo 0)"
             if (( total > 0 )); then
                 pct=$((have * 100 / total))
                 printf "    下载进度: %3d%%  (%d MB / %d MB)\n" "$pct" "$((have/1048576))" "$((total/1048576))"
@@ -242,8 +261,15 @@ ensure_ipsw() { # <vers> <build> -> echo path
             fi
             sec=$((sec+5))
         done
-        wait "$apid" || { rm -f "$p.ipsw" "$p.ipsw.aria2"; err "下载失败, 请检查网络后重试"; }
+        wait "$apid" || { rm -f "$p.ipsw" "$p.ipsw.aria2" "$dlfile"; err "下载失败, 请检查网络后重试"; }
+        if [[ "$dlfile" == *.part ]]; then
+            mv "$dlfile" "$p.ipsw" || err "固件改名失败"
+        fi
         local final_sz="$(stat -f%z "$p.ipsw" 2>/dev/null || echo 0)"
+        if (( total > 0 )) && [[ "$final_sz" != "$total" ]]; then
+            rm -f "$p.ipsw"
+            err "下载不完整 (大小不符), 已删除残缺文件, 请重试"
+        fi
         printf "    下载完成: 100%% (%d MB)\n" "$((final_sz/1048576))"
     fi
     echo "$p"
@@ -814,6 +840,10 @@ save_dra_blob() { # <目标版本>
 cmd_restore() {
     acquire_lock
     local custom="${1:-}"
+    # 用户从其他目录传入相对路径时, 按调用时的 cwd 还原 (脚本启动时已 cd 到项目目录)
+    if [[ -n "$custom" && "$custom" != /* ]]; then
+        custom="$CALLER_CWD/$custom"
+    fi
     if [[ -z "$custom" ]]; then
         # 防呆: 存在多个版本的固件时禁止猜测, 必须明确指定
         local all_ipsvs=("$DIR"/${DEV}_*_CustomP6.ipsw)

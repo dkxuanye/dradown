@@ -26,6 +26,8 @@
 - **Arduino + USB Host Shield 或 Raspberry Pi Pico**，用于每次刷机前进入 pwned DFU
 - 一条数据线，建议直接连接 Mac，不使用 Hub
 - macOS **10.13 (High Sierra) 或更高**（工具最低要求 10.11/10.12；脚本兼容系统自带 bash 3.2）
+- **Apple Silicon (M 系列) Mac 需安装 Rosetta 2**：`softwareupdate --install-rosetta --agree-to-license`
+  （附带工具链为 x86_64 二进制，Intel Mac 无需此步）
 - 重要数据备份：刷机将清除设备全部内容
 
 > iOS 5 目标还可能导致蜂窝/基带不可用。确定要刷 iOS 5 时，向导会再次提示。
@@ -57,6 +59,8 @@
     ./dradown.sh ipsw 8.4.1         # 只构建目标版本固件
     ./dradown.sh restore <固件路径>  # 刷入明确指定的固件
     ./dradown.sh auto 7.1.2         # 构建缺则自动构建，再进入刷入流程
+    ./dradown.sh keys <build号>     # 单独下载指定 build 的固件密钥
+    ./dradown.sh clean              # 清理工作缓存
 
 无参数运行 `./dradown.sh`（或双击 `.command`）进入新手向导。
 
