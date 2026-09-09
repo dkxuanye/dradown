@@ -124,28 +124,6 @@ ui_stage() {
     printf '\n[%s/4] %s\n' "$1" "$2"
 }
 
-ui_run_quiet() {
-    # ui_run_quiet <说明> <日志文件> <命令及参数...>
-    local label="$1" logfile="$2"
-    shift 2
-    mkdir -p "$DIR/logs"
-    "$@" >"$logfile" 2>&1 &
-    local pid=$! spin='|/-\\' i=0
-    while kill -0 "$pid" 2>/dev/null; do
-        i=$(( (i + 1) % 4 ))
-        printf '\r  %s %s' "$label" "${spin:$i:1}"
-        sleep 1
-    done
-    wait "$pid"
-    local result=$?
-    if [[ $result -eq 0 ]]; then
-        printf '\r  %s 完成\n' "$label"
-    else
-        printf '\r  %s 失败\n' "$label"
-    fi
-    return "$result"
-}
-
 ui_zip() {
     if [[ $DRADOWN_GUIDED == 1 ]]; then
         zip -r0 "$@" >/dev/null 2>&1
@@ -745,7 +723,7 @@ cmd_info() {
         echo "  当前系统: iOS $vers   (设备现在跑的系统)"
         echo "  基础版本: iOS $BASE_VERS  (自动处理, 无需你操作)"
         echo "            └ 刷机时作为引导链打包进固件, 不是要刷的系统"
-        echo "  目标版本: 由你选择 — 在菜单 [2] 或 [4] 里输入想刷的版本"
+        echo "  目标版本: 由你选择 — 在菜单 [1] 或 [2] 里输入想刷的版本"
         echo "  ─────────────────────────────────────────────"
         if [[ "$vers" == "$BASE_VERS" ]]; then
             echo "  状态: ✅ 可刷写任意目标版本 (5.0-9.3.6); 6.x 目标带免签引导"
@@ -760,13 +738,13 @@ cmd_info() {
         case "$mode" in
             *DFU* )
                 if [[ -n "$pwnd" ]]; then
-                    echo "  状态:   ✅ 可直接刷入 — 运行 [3]/[4] 即可"
+                    echo "  状态:   ✅ 可直接刷入 — 运行 [1] 开始刷机 即可"
                 else
-                    echo "  状态:   DFU 模式 (未 pwn) — 请先用 Arduino 工具 pwn, 再运行 [3]/[4]"
+                    echo "  状态:   DFU 模式 (未 pwn) — 请先用 Arduino 工具 pwn, 再运行 [1] 开始刷机"
                 fi
             ;;
             *Recovery* )
-                echo "  状态:   恢复模式 — 可直接运行 [3]/[4] 刷入"
+                echo "  状态:   恢复模式 — 可直接运行 [1] 开始刷机 刷入"
             ;;
         esac
     else
@@ -943,6 +921,8 @@ cmd_restore() {
     else
         warn "SRTG 仍在 ($srtg), pwnediBSS 可能未执行, 继续尝试刷入 ..."
     fi
+    # 暂停 macOS USB 设备代理，避免与刷入通信冲突 (与 LIK restore.sh 一致)
+    killall -STOP AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
     # 自动重试: 其它设备的 usbmuxd 事件/USB 枚举竞态可能导致 restore 模式连接失败 (254)
     local attempt ret
     local restore_log="$DIR/logs/restore-${tv}-${tb2}.log"
@@ -967,6 +947,8 @@ cmd_restore() {
         done
     done
     echo
+    # 恢复被暂停的 macOS USB 设备代理
+    killall -CONT AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
     if [[ $ret -eq 0 ]]; then
         if [[ $DRADOWN_GUIDED == 1 ]]; then
             ui_success "$tv"
@@ -1091,6 +1073,7 @@ cmd_menu() {
 }
 
 # ---------- 已构建固件选择（高级/兼容入口） ----------
+# 当前未接入菜单，保留以备后续版本使用
 cmd_restore_menu() {
     local all_ipsvs=("$DIR"/${DEV}_*_CustomP6.ipsw)
     local list=() i

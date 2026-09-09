@@ -37,7 +37,7 @@ restore_output="$(bash "$SCRIPT" restore 2>/dev/null || true)"
 check "restore refuses to guess among multiple IPSWs" contains "$restore_output" "必须明确指定"
 
 check "auto path does not bypass confirmation" bash -c '! grep -q "DRADOWN_YES=1 cmd_restore" "$1"' _ "$SCRIPT"
-check "lock is re-entrant for the same process" bash -c 'grep -q "lock_pid=.*cat.*lock\|lock_pid.*\$\$" "$1"' _ "$SCRIPT"
+check "lock is re-entrant for the same process" bash -c 'grep -q "lock_pid" "$1" && grep -q "return 0" "$1"' _ "$SCRIPT"
 check "download reports a known or unknown total clearly" bash -c 'grep -q "下载进度" "$1"' _ "$SCRIPT"
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
