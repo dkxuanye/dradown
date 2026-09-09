@@ -504,18 +504,25 @@ write_base_bundle() { # <basevers> <basebuild>
     log "base bundle 完成: $bundle (RootSize=$rootfs_size)"
 }
 
-# ---------- 实例锁 (防多实例抢设备) ----------
+# ---------- 实例锁 (防多实例抢设备) + 清理 trap ----------
+DRADOWN_LOCK="$DIR/.dradown.lock"
+
+cleanup_on_exit() {
+    rm -f "$DRADOWN_LOCK"
+    # 恢复可能被暂停的 macOS USB 设备代理
+    killall -CONT AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
+}
+
 acquire_lock() {
-    local lock="$DIR/.dradown.lock"
-    local lock_pid="$(cat "$lock" 2>/dev/null)"
+    local lock_pid="$(cat "$DRADOWN_LOCK" 2>/dev/null)"
     if [[ -n "$lock_pid" && "$lock_pid" == "$$" ]]; then
         return 0
     fi
     if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
         err "另一个 dradown 实例正在运行 (PID $lock_pid), 请先等待其完成"
     fi
-    echo $$ > "$lock"
-    trap 'rm -f "$lock"' EXIT
+    echo $$ > "$DRADOWN_LOCK"
+    trap cleanup_on_exit EXIT
 }
 
 # ---------- 构建自定义 IPSW ----------
@@ -922,7 +929,9 @@ cmd_restore() {
         warn "SRTG 仍在 ($srtg), pwnediBSS 可能未执行, 继续尝试刷入 ..."
     fi
     # 暂停 macOS USB 设备代理，避免与刷入通信冲突 (与 LIK restore.sh 一致)
+    # 中断安全: Ctrl-C/异常退出时通过 EXIT trap 恢复代理
     killall -STOP AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
+    AGENTS_STOPPED=1
     # 自动重试: 其它设备的 usbmuxd 事件/USB 枚举竞态可能导致 restore 模式连接失败 (254)
     local attempt ret
     local restore_log="$DIR/logs/restore-${tv}-${tb2}.log"
@@ -947,7 +956,7 @@ cmd_restore() {
         done
     done
     echo
-    # 恢复被暂停的 macOS USB 设备代理
+    # 刷入结束后恢复 macOS USB 设备代理
     killall -CONT AMPDevicesAgent AMPDeviceDiscoveryAgent MobileDeviceUpdater 2>/dev/null
     if [[ $ret -eq 0 ]]; then
         if [[ $DRADOWN_GUIDED == 1 ]]; then
