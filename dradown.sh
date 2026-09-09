@@ -109,13 +109,35 @@ ensure_ipsw() { # <vers> <build> -> echo path
         local url="$(curl -s --fail "$IPSW_ME" | "$JQ" -r --arg b "$2" \
             '.firmwares[] | select(.buildid == $b) | .url' | head -1)"
         [[ -n "$url" && "$url" != "null" ]] || err "无法获取 $1 ($2) 的下载地址"
-        log "下载 $DEV $1 ($2) 固件, 较大, 请耐心等待 ..."
+        # 获取总大小 (用于显示百分比)
+        local total=0 clen
+        clen="$(curl -sIL --max-time 20 "$url" | awk -F': ' 'tolower($1)=="content-length"{n=$2; gsub(/\r/,"",n); print n}' | tail -1)"
+        [[ "$clen" =~ ^[0-9]+$ ]] && total="$clen"
+        log "开始下载 $DEV $1 ($2) 官方固件 (共 $((total/1048576)) MB), 请勿断开网络 ..."
         if command -v aria2c >/dev/null; then
-            aria2c --ca-certificate=/etc/ssl/cert.pem -x8 -s8 -k1M --file-allocation=none \
-                -o "$(basename "$p").ipsw" -d "$(dirname "$p")" "$url" || err "下载失败"
+            aria2c --ca-certificate=/etc/ssl/cert.pem -x8 -s8 -k1M --file-allocation=none -q \
+                -o "$(basename "$p").ipsw" -d "$(dirname "$p")" "$url" &
+            local apid=$!
         else
-            curl -L -o "$p.ipsw" "$url" || err "下载失败"
+            curl -sL -o "$p.ipsw" "$url" &
+            local apid=$!
         fi
+        # 进度显示: 每 5 秒打印一次百分比 (aria2c 后台运行)
+        local have=0 pct=0 sec=0
+        while kill -0 "$apid" 2>/dev/null; do
+            sleep 5
+            have="$(stat -f%z "$p.ipsw" 2>/dev/null || echo 0)"
+            if (( total > 0 )); then
+                pct=$((have * 100 / total))
+                printf "    下载进度: %3d%%  (%d MB / %d MB)\n" "$pct" "$((have/1048576))" "$((total/1048576))"
+            else
+                printf "    已下载: %d MB ...\n" "$((have/1048576))"
+            fi
+            sec=$((sec+5))
+        done
+        wait "$apid" || { rm -f "$p.ipsw" "$p.ipsw.aria2"; err "下载失败, 请检查网络后重试"; }
+        local final_sz="$(stat -f%z "$p.ipsw" 2>/dev/null || echo 0)"
+        printf "    下载完成: 100%% (%d MB)\n" "$((final_sz/1048576))"
     fi
     echo "$p"
 }
