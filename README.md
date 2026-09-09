@@ -20,36 +20,45 @@
 
 目标版本范围：**iOS 5.0 – 9.3.6 任意官方版本**（DRA exploit 分区对 6.x 目标提供免签引导；7.x/8.x/9.x 走苹果签名链开机）。
 
-## 硬件/环境要求
+## 开始前请准备
 
-- iPhone 4S（iPhone4,1, n94ap），需通过 iOS 6.1.3 兼容测试（能刷入并开机 6.1.3）
-- **checkm8-a5 pwn 硬件**：Arduino + USB Host Shield 或 Raspberry Pi Pico（见 LIK wiki: checkm8-a5）——每次刷机前 pwn 一次
-- macOS **10.13 (High Sierra) 或更高**（全部工具实测最低要求 10.11/10.12 ✓；脚本兼容系统自带 bash 3.2）
-- 数据线（建议直插 Mac，不用 Hub）
+- iPhone 4S（iPhone4,1 / n94ap）
+- **Arduino + USB Host Shield 或 Raspberry Pi Pico**，用于每次刷机前进入 pwned DFU
+- 一条数据线，建议直接连接 Mac，不使用 Hub
+- macOS **10.13 (High Sierra) 或更高**（工具最低要求 10.11/10.12；脚本兼容系统自带 bash 3.2）
+- 重要数据备份：刷机将清除设备全部内容
 
-## 快速开始
+> iOS 5 目标还可能导致蜂窝/基带不可用。确定要刷 iOS 5 时，向导会再次提示。
 
-### 新手方式（双击）
+## 快速开始（新手向导）
 
-双击 **`双击运行.command`** 打开图形化菜单（按编号操作，无需记命令）：
+这是 **Terminal 终端向导**，不是图形窗口。双击 **`双击运行.command`** 后，只需按编号操作：
 
-    [1] 检测设备与系统版本
-    [2] 构建目标版本固件
-    [3] 刷入（选择已构建的固件）
-    [4] 一键模式：构建 + 刷入
+    [1] 开始刷机（推荐）
+    [2] 只构建固件
+    [3] 查看设备状态
+    [4] 工具检查与修复
+    [H] 使用帮助 / 已知风险
 
-> 首次从网络下载的 .command 会被 macOS 拦截——**右键点它 → 打开**（只需一次），
-> 或终端执行：`xattr -d com.apple.quarantine 双击运行.command`
+推荐流程：
 
-### 命令方式
+1. 选择“开始刷机”，输入要安装的**目标版本**（刷完后设备运行的版本）。
+2. 确认已备份数据，并确认清除设备内容。
+3. 按提示让设备进入 DFU，用 Arduino/Pico checkm8-a5 完成 pwn。
+4. 保持数据线连接，向导会自动完成刷入并提示结果。
 
-    ./dradown.sh setup              # 下载全部工具与资源
-    ./dradown.sh info               # 检测设备与 iOS 版本
-    ./dradown.sh ipsw 8.4.1         # 构建目标固件（自动下载固件+密钥+打包+修复）
-    # 设备进 DFU → Arduino pwn →
-    ./dradown.sh restore iPhone4,1_8.4.1_12H321_CustomP6.ipsw
-                                    # 刷入（明确指定固件，防呆；等待 Arduino pwn）
-    ./dradown.sh auto 7.1.2         # 一键：构建(缺则) → 等待 pwn → 自动刷入
+**基础版本 iOS 6.1.3 只用于准备刷机引导链，由工具自动处理，不是最终系统。**
+首次从网络下载的 `.command` 文件若被 macOS 拦截，请右键点它 → **打开**（只需一次）。
+
+### 高级命令
+
+    ./dradown.sh setup              # 检查/下载工具与资源
+    ./dradown.sh info               # 查看设备状态
+    ./dradown.sh ipsw 8.4.1         # 只构建目标版本固件
+    ./dradown.sh restore <固件路径>  # 刷入明确指定的固件
+    ./dradown.sh auto 7.1.2         # 构建缺则自动构建，再进入刷入流程
+
+无参数运行 `./dradown.sh`（或双击 `.command`）进入新手向导。
 
 ## 工作机制
 
@@ -65,7 +74,7 @@
 - **刷机会抹掉全部数据**
 - **刷 iOS 5 会损坏基带**（蜂窝失效；WiFi/系统正常）。恢复方法：刷回 7.1.2/8.4.1/9.3.x
 - 后期生产批次的 4S 可能无法刷 iOS 5/6（白屏/"Waiting for NAND" 卡死，硬件限制无法修复）
-- 刷 6.1.6/6.1.6 以下版本后如不开机：Clear NVRAM（见 LIK wiki / 本工具后续版本）
+- 刷 6.x 版本后如不开机：先强制重启一次；仍无法开机时，使用 LIK 的 Clear NVRAM 工具清除引导变量
 - 激活：需要 SIM 卡 + 网络；无基带服务时部分功能受限
 - NVRAM 中的 exploit 引导变量**不要随意清除**（清除后需重走 DRA 刷机流程）
 
@@ -73,7 +82,7 @@
 
 - 仅支持 iPhone 4S（DRA v6 另支持 iPad2,1 / iPod touch 4，本脚本未封装）
 - 目标版本下限 iOS 5.0（更早版本未经测试）
-- JB 越狱组件路径（8.x/9.x 的 aquila/freeze）未默认启用——如需越狱版固件请使用 Legacy-iOS-Kit
+- 本向导默认只负责刷入系统，不额外安装越狱软件；如需越狱版系统，请使用 Legacy-iOS-Kit
 
 ## 免责声明
 

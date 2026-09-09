@@ -1,17 +1,17 @@
 #!/bin/bash
-# dradown.sh — 精简版 iPhone 4S "DRA v6" 免 SHSH 降级工具
+# dradown.sh — iPhone 4S 终端刷机向导
 #
-# 原理: De Rebus Antiquis v6 (synackuk) 的 iBoot HFS+ 漏洞利用。
-# 设备必须在 iOS 6.1.3 (10B329) 上。降级到任意 iOS 5.0-9.3.6 均无需 SHSH。
-# 构建流程 1:1 复刻 LukeZGD/Legacy-iOS-Kit restore.sh 的 ipsw_prepare_powder 路径,
-# 仅保留 iPhone4,1 + DRA v6 所需部分; 工具二进制来自 Legacy-iOS-Kit (开源)。
+# 基于 De Rebus Antiquis v6 / checkm8-a5。菜单适合新手，命令行入口供高级用户使用。
+# 基础版本 iOS 6.1.3 由工具自动准备；目标版本是刷完后设备实际运行的系统。
 #
-# 用法:
-#   ./dradown.sh setup            下载/检查工具与资源
-#   ./dradown.sh info             检测连接的设备与 iOS 版本
-#   ./dradown.sh ipsw <版本>      构建自定义 IPSW, 例如: ./dradown.sh ipsw 8.4.1
-#   ./dradown.sh restore [ipsw]   进入恢复模式并刷入自定义 IPSW (抹掉数据!)
-#   ./dradown.sh clean            清理 work 目录
+# 命令行入口:
+#   ./dradown.sh                 打开新手向导
+#   ./dradown.sh setup            检查/下载工具与资源
+#   ./dradown.sh info             查看设备状态
+#   ./dradown.sh ipsw <版本>      只构建目标版本固件
+#   ./dradown.sh restore <ipsw>   刷入明确指定的固件
+#   ./dradown.sh auto <版本>      高级一键流程（仍会要求确认）
+#   ./dradown.sh clean            清理工作缓存
 
 set -o pipefail
 
@@ -41,14 +41,137 @@ SAVED="$DIR/saved"
 JQ="$BIN/jq"
 PLBUDDY=/usr/libexec/PlistBuddy
 
-log()  { echo -e "\033[0;32m$(date '+%H:%M:%S')\033[0m: $*"; }
-warn() { echo -e "\033[0;33mWARNING\033[0m: $*"; }
-err()  { echo -e "\033[0;31mERROR\033[0m: $*" >&2; exit 1; }
+if [[ -t 1 ]]; then
+    C_GREEN='\033[0;32m'
+    C_YELLOW='\033[0;33m'
+    C_RED='\033[0;31m'
+    C_RESET='\033[0m'
+else
+    C_GREEN=''
+    C_YELLOW=''
+    C_RED=''
+    C_RESET=''
+fi
+
+log()  { printf '%b%s%b %s\n' "$C_GREEN" "$(date '+%H:%M:%S')" "$C_RESET" "$*"; }
+warn() { printf '%b提示%b: %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
+err()  { printf '%b失败%b: %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
+
+ui_title() {
+    printf '\n%s\n' '==============================================='
+    printf '  %s\n' "$1"
+    printf '%s\n' '==============================================='
+}
+
+ui_pause() {
+    printf '\n按回车返回上一级...'
+    read -r || true
+}
+
+ui_help() {
+    ui_title '使用帮助'
+    cat <<EOF
+这是一台 iPhone 4S 的刷机向导。
+
+目标版本 = 刷完后设备要运行的 iOS 版本。
+基础版本 = iOS $BASE_VERS，只用于准备刷机引导链，由工具自动处理。
+
+开始前准备：
+  1. 备份设备上的重要数据（刷机会清除全部内容）
+  2. 准备 Arduino/Pico checkm8-a5 工具
+  3. 准备数据线，并将设备直接连接到 Mac
+
+刷机时，向导会提示你进入 DFU 并完成 pwn；之后不要拔线。
+刷 iOS 5 可能导致蜂窝/基带不可用。遇到问题请按屏幕提示重试。
+EOF
+    ui_pause
+}
+
+ui_restore_confirm() {
+    local target="$1"
+    ui_title '确认刷入'
+    printf '目标系统: iOS %s\n' "$target"
+    printf '刷机引导: iOS %s（自动准备，不会成为最终系统）\n' "$BASE_VERS"
+    printf '\n这次操作会清除 iPhone 上的全部内容。\n'
+    case "$target" in
+        5.*)
+            printf '重要提示: iOS 5 可能导致蜂窝/基带不可用。\n'
+            ;;
+    esac
+    printf '\n请确认：已备份数据，并准备好 Arduino/Pico pwn 工具。\n'
+    printf '输入“继续”开始，直接按回车取消: '
+    local answer
+    read -r answer || return 1
+    [[ "$answer" == '继续' || "$answer" == 'YES' || "$answer" == 'yes' ]]
+}
+
+ui_failure() {
+    local stage="$1" logfile="$2"
+    printf '\n刷机在“%s”阶段停止。\n' "$stage"
+    [[ -n "$logfile" && -s "$logfile" ]] && printf '详细日志: %s\n' "$logfile"
+    printf '设备可以安全重试；请按提示重新进入 DFU 并 pwn。\n'
+}
+
+ui_success() {
+    local target="$1"
+    ui_title '刷入完成'
+    printf '已安装: iOS %s\n' "$target"
+    printf 'iPhone 正在重启，首次开机可能需要几分钟。\n'
+    printf '看到设置界面后即可断开数据线。\n'
+}
+
+ui_stage() {
+    printf '\n[%s/4] %s\n' "$1" "$2"
+}
+
+ui_run_quiet() {
+    # ui_run_quiet <说明> <日志文件> <命令及参数...>
+    local label="$1" logfile="$2"
+    shift 2
+    mkdir -p "$DIR/logs"
+    "$@" >"$logfile" 2>&1 &
+    local pid=$! spin='|/-\\' i=0
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % 4 ))
+        printf '\r  %s %s' "$label" "${spin:$i:1}"
+        sleep 1
+    done
+    wait "$pid"
+    local result=$?
+    if [[ $result -eq 0 ]]; then
+        printf '\r  %s 完成\n' "$label"
+    else
+        printf '\r  %s 失败\n' "$label"
+    fi
+    return "$result"
+}
+
+ui_zip() {
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        zip -r0 "$@" >/dev/null 2>&1
+    else
+        zip -r0 "$@"
+    fi
+}
 
 fetch() { # fetch <url> <file>
     [[ -s "$2" ]] && return 0
-    log "下载 $(basename "$2") ..."
-    curl -L --fail -o "$2" "$1" || err "下载失败: $1"
+    [[ $FETCH_QUIET == 1 ]] || log "准备 $(basename "$2") ..."
+    curl -fsSL -o "$2" "$1" || err "下载失败，请检查网络后重试"
+}
+
+ui_download_group() {
+    # ui_download_group <说明> <总数> <url/file>...
+    local label="$1" total="$2" pair url file index=0
+    shift 2
+    for pair in "$@"; do
+        url="${pair%%|*}"
+        file="${pair#*|}"
+        index=$((index + 1))
+        printf '\r  %-18s %d/%d' "$label" "$index" "$total"
+        FETCH_QUIET=1 fetch "$url" "$file"
+    done
+    printf '\r  %-18s 完成\n' "$label"
 }
 
 # ---------- setup ----------
@@ -63,30 +186,31 @@ cmd_setup() {
     mkdir -p "$BIN/lib" "$KEYS" "$IPSWDIR" "$WORK" "$SAVED" \
         "$RES/firmware/src/target/n94/10B329" "$RES/jailbreak"
 
-    log "下载工具二进制 (来源: LukeZGD/Legacy-iOS-Kit) ..."
-    local t
+    local t l pairs=()
     for t in "${TOOLS[@]}"; do
-        fetch "$LIK_RAW/bin/macos/$t" "$BIN/$t"
+        pairs+=("$LIK_RAW/bin/macos/$t|$BIN/$t")
     done
-    log "下载动态库 ..."
-    local l
+    ui_download_group '准备工具' "${#TOOLS[@]}" "${pairs[@]}"
+    pairs=()
     for l in "${LIBS[@]}"; do
-        fetch "$LIK_RAW/bin/macos/lib/$l" "$BIN/lib/$l"
+        pairs+=("$LIK_RAW/bin/macos/lib/$l|$BIN/lib/$l")
     done
+    ui_download_group '准备动态库' "${#LIBS[@]}" "${pairs[@]}"
     chmod +x "$BIN"/* 2>/dev/null
 
-    log "下载 DRA 资源 ..."
-    fetch "$LIK_RAW/resources/firmware/src/bin.tar"                       "$RES/firmware/src/bin.tar"
-    fetch "$LIK_RAW/resources/firmware/src/ios9.tar"                      "$RES/firmware/src/ios9.tar"
-    fetch "$LIK_RAW/resources/firmware/src/partition"                     "$RES/firmware/src/partition"
-    fetch "$LIK_RAW/resources/firmware/src/target/n94/10B329/exploit"     "$RES/firmware/src/target/n94/10B329/exploit"
-    fetch "$LIK_RAW/resources/jailbreak/freeze.tar.gz"                    "$RES/jailbreak/freeze.tar.gz"
-    fetch "$LIK_RAW/resources/jailbreak/LukeZGD.tar"                      "$RES/jailbreak/LukeZGD.tar"
+    pairs=(
+        "$LIK_RAW/resources/firmware/src/bin.tar|$RES/firmware/src/bin.tar"
+        "$LIK_RAW/resources/firmware/src/ios9.tar|$RES/firmware/src/ios9.tar"
+        "$LIK_RAW/resources/firmware/src/partition|$RES/firmware/src/partition"
+        "$LIK_RAW/resources/firmware/src/target/n94/10B329/exploit|$RES/firmware/src/target/n94/10B329/exploit"
+        "$LIK_RAW/resources/jailbreak/freeze.tar.gz|$RES/jailbreak/freeze.tar.gz"
+        "$LIK_RAW/resources/jailbreak/LukeZGD.tar|$RES/jailbreak/LukeZGD.tar"
+    )
+    ui_download_group '准备 DRA 资源' "${#pairs[@]}" "${pairs[@]}"
 
     "$BIN/jq" --version >/dev/null 2>&1 || err "jq 无法运行"
     "$BIN/irecovery" -h >/dev/null 2>&1 || err "irecovery 无法运行 (检查 bin/lib 动态库)"
-    log "工具与资源就绪。exploit blob md5:"
-    md5 -q "$RES/firmware/src/target/n94/10B329/exploit"
+    log "工具与资源已准备好。"
 }
 
 # ---------- 固件版本解析与下载 ----------
@@ -105,7 +229,7 @@ ipsw_path_for() { # <vers> <build> -> echo path (无扩展名)
 
 ensure_ipsw() { # <vers> <build> -> echo path
     local p="$(ipsw_path_for "$1" "$2")"
-    if [[ ! -s "$p.ipsw" ]]; then
+    if [[ ! -s "$p.ipsw" || -s "$p.ipsw.aria2" ]]; then
         local url="$(curl -s --fail "$IPSW_ME" | "$JQ" -r --arg b "$2" \
             '.firmwares[] | select(.buildid == $b) | .url' | head -1)"
         [[ -n "$url" && "$url" != "null" ]] || err "无法获取 $1 ($2) 的下载地址"
@@ -405,8 +529,12 @@ write_base_bundle() { # <basevers> <basebuild>
 # ---------- 实例锁 (防多实例抢设备) ----------
 acquire_lock() {
     local lock="$DIR/.dradown.lock"
-    if [[ -e "$lock" ]] && kill -0 "$(cat "$lock" 2>/dev/null)" 2>/dev/null; then
-        err "另一个 dradown 实例正在运行 (PID $(cat "$lock")), 请先等待其完成或 kill"
+    local lock_pid="$(cat "$lock" 2>/dev/null)"
+    if [[ -n "$lock_pid" && "$lock_pid" == "$$" ]]; then
+        return 0
+    fi
+    if [[ -n "$lock_pid" ]] && kill -0 "$lock_pid" 2>/dev/null; then
+        err "另一个 dradown 实例正在运行 (PID $lock_pid), 请先等待其完成"
     fi
     echo $$ > "$lock"
     trap 'rm -f "$lock"' EXIT
@@ -423,12 +551,21 @@ cmd_ipsw() {
     esac
     local tb="$(resolve_build "$tv")"
     log "构建固件: 目标版本 $tv ($tb) / 基础版本 $BASE_VERS ($BASE_BUILD, 引导链, 自动)"
-    echo "  (基础版本 $BASE_VERS 仅用于刷机引导链; 刷完后设备运行的是目标版本 $tv)"
+    echo "  （基础版本 $BASE_VERS 仅用于刷机引导链；刷完后设备运行的是目标版本 $tv）"
 
-    local t_ipsw="$(ensure_ipsw "$tv" "$tb")"
-    local b_ipsw="$(ensure_ipsw "$BASE_VERS" "$BASE_BUILD")"
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        ui_stage 1 '准备官方固件'
+    fi
+    ensure_ipsw "$tv" "$tb"
+    local t_ipsw="$IPSWDIR/${DEV}_${tv}_${tb}_Restore.ipsw"
+    ensure_ipsw "$BASE_VERS" "$BASE_BUILD"
+    local b_ipsw="$IPSWDIR/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw"
     cmd_keys "$tb" "$BASE_BUILD"
 
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        printf '  官方固件已准备好。\n'
+        ui_stage 2 '创建刷机固件'
+    fi
     # 干净的工作目录
     rm -rf "$WORK"; mkdir -p "$WORK"; cd "$WORK" || err "无法进入 work 目录"
 
@@ -471,10 +608,17 @@ cmd_ipsw() {
     fi
 
     log "运行 powdersn0w 构建自定义 IPSW ..."
-    local ExtraArgs=""
-    "$BIN/powdersn0w" "../ipsw/${DEV}_${tv}_${tb}_Restore.ipsw" temp.ipsw \
-        -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]}
-    [[ -s temp.ipsw ]] || err "powdersn0w 构建失败 (未生成 temp.ipsw)"
+    local ExtraArgs="" build_log="$DIR/logs/build-${tv}-${tb}.log"
+    mkdir -p "$DIR/logs"
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        "$BIN/powdersn0w" "../ipsw/${DEV}_${tv}_${tb}_Restore.ipsw" temp.ipsw \
+            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]} >"$build_log" 2>&1
+    else
+        "$BIN/powdersn0w" "../ipsw/${DEV}_${tv}_${tb}_Restore.ipsw" temp.ipsw \
+            -base "../ipsw/${DEV}_${BASE_VERS}_${BASE_BUILD}_Restore.ipsw" $ExtraArgs ${JBFiles[@]}
+    fi
+    [[ -s temp.ipsw ]] || { [[ $DRADOWN_GUIDED == 1 ]] && ui_failure '创建刷机固件' "$build_log"; err "powdersn0w 构建失败 (未生成 temp.ipsw)"; }
+    [[ $DRADOWN_GUIDED == 1 ]] && printf '  刷机固件已创建。\n'
 
     # 目标 < 7.x: 补 patch_iboot --logo (iBoot2 logo 补丁 + ibob 魔数) 并加入 all_flash
     case "$tv" in
@@ -493,15 +637,15 @@ cmd_ipsw() {
             # 二进制可能已给 iBoot2 打过补丁; patcher 报 Nothing to patch 时直接使用
             "$BIN/iBoot32Patcher" iBoot.dec iBoot.pwned > /dev/null 2>&1 || true
             [[ -s iBoot.pwned ]] || cp iBoot.dec iBoot.pwned
-            "$BIN/xpwntool" iBoot.pwned iBoot -t iBoot.orig
+            "$BIN/xpwntool" iBoot.pwned iBoot -t iBoot.orig > /dev/null 2>&1
             # ibot -> ibob 魔数 (使补丁版 iBoot 写入 NOR 的 ibob 槽位)
             echo "0000010: 626F" | xxd -r - iBoot
             echo "0000020: 626F" | xxd -r - iBoot
-            "$BIN/xpwntool" iBoot.pwned "$iboot2_name" -t iBoot -iv "$iboot_iv" -k "$iboot_key"
+            "$BIN/xpwntool" iBoot.pwned "$iboot2_name" -t iBoot -iv "$iboot_iv" -k "$iboot_key" > /dev/null 2>&1
             mkdir -p "$ALL_FLASH"
             mv iBoot*.img3 "$ALL_FLASH/" 2>/dev/null
             mv "$iboot2_name" "$ALL_FLASH/" 2>/dev/null
-            zip -r0 temp.ipsw "$ALL_FLASH/"iBoot*.img3
+            ui_zip temp.ipsw "$ALL_FLASH/"iBoot*.img3
         ;;
     esac
 
@@ -510,9 +654,14 @@ cmd_ipsw() {
 
     local out="$DIR/${DEV}_${tv}_${tb}_CustomP6.ipsw"
     mv temp.ipsw "$out"
-    log "完成! 自定义 IPSW: $out"
-    echo
-    echo "下一步: ./dradown.sh restore \"$out\""
+    cd "$DIR" || err "无法返回项目目录"
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        printf '  已创建目标固件: iOS %s\n' "$tv"
+    else
+        log "完成! 自定义 IPSW: $out"
+        echo
+        echo "下一步: ./dradown.sh restore \"$out\""
+    fi
 }
 
 # powdersn0w 二进制会把 ramdisk options 的 SystemPartitionSize 清零,
@@ -532,7 +681,7 @@ fix_ramdisk_options() {
     # 未注入的遗留文件当成交换后的 ramdisk 打回 IPSW (注入成果丢失的元凶)
     rm -f "$rd_name"
     tar -xzOf temp.ipsw "$rd_name" > rd_fix.dmg || err "提取 ramdisk 失败"
-    "$BIN/xpwntool" rd_fix.dmg rd_fix.dec -iv "$iv" -k "$key" || err "ramdisk 解密失败"
+    "$BIN/xpwntool" rd_fix.dmg rd_fix.dec -iv "$iv" -k "$key" > /dev/null 2>&1 || err "ramdisk 解密失败"
     # 提取二进制处理过的 options (含关键的 UpdateBaseband=false), 只修正分区大小两个坏值,
     # 不可整文件覆盖 (会丢 UpdateBaseband=false 导致设备端刷基带失败)
     "$BIN/hfsplus" rd_fix.dec extract "$optpath" 2>/dev/null
@@ -550,9 +699,9 @@ fix_ramdisk_options() {
     plutil -insert UpdateBaseband -bool false "options.${HWMODEL}.plist"
     "$BIN/hfsplus" rd_fix.dec delete "$optpath" 2>/dev/null
     "$BIN/hfsplus" rd_fix.dec add "options.${HWMODEL}.plist" "$optpath" || err "写入 options 失败"
-    "$BIN/xpwntool" rd_fix.dec rd_fix.img3 -t rd_fix.dmg || err "ramdisk 重打包失败"
+    "$BIN/xpwntool" rd_fix.dec rd_fix.img3 -t rd_fix.dmg > /dev/null 2>&1 || err "ramdisk 重打包失败"
     mv rd_fix.img3 "$rd_name"
-    zip -r0 temp.ipsw "$rd_name" || err "回写 ramdisk 失败"
+    ui_zip temp.ipsw "$rd_name" || err "回写 ramdisk 失败"
     log "已修复 ramdisk options (SystemPartitionSize=$sp, UpdateBaseband=false)"
 }
 
@@ -581,7 +730,7 @@ battery_images() {
         rm -f "$bn"
     done
     mv manifest "$ALL_FLASH/"
-    zip -r0 temp.ipsw "$ALL_FLASH/"*
+    ui_zip temp.ipsw "$ALL_FLASH/"*
 }
 
 # ---------- 设备检测 ----------
@@ -621,7 +770,8 @@ cmd_info() {
             ;;
         esac
     else
-        err "未检测到设备。请用数据线连接 iPhone 4S 后重试"
+        printf '  未检测到设备。请连接 iPhone 4S 后再试。\n'
+        return 0
     fi
 }
 
@@ -718,24 +868,15 @@ cmd_restore() {
     else
         log "设备尚未连接, 继续等待 pwned DFU ..."
     fi
-    echo
-    echo "=================== 重要提示 ==================="
-    echo " * 刷入会【抹掉设备全部数据】, 请先备份!"
-    echo " * 设备当前系统必须是 iOS $BASE_VERS (否则 DRA 漏洞无法触发)"
-    echo " * 过程中设备保持 USB 连接, 不要断开"
-    echo " * 失败可重刷官方 $BASE_VERS IPSW 救回 (设备无变砖风险, 属可恢复)"
-    echo "================================================"
-    echo
-    if [[ $DRADOWN_YES == 1 ]]; then
-        log "已确认 (自动模式)"
+    if [[ $DRADOWN_CONFIRMED == 1 ]]; then
+        log "已确认: 清除数据并安装 iOS $tv"
     else
-        read -r -p "输入 YES 继续: " a
-        [[ "$a" == "YES" ]] || err "已取消"
+        ui_restore_confirm "$tv" || return 0
     fi
 
-    # DRA v6 刷入链路: pwned DFU -> primepwn 发送【解包裸 iBSS】-> 补丁版恢复模式 -> idevicerestore。
-    # img3 容器在 checkm8-a5 的 pwned DFU 里不会被执行, 必须发裸 pwnediBSS (与 LIK 一致)。
-    local tb2="$(resolve_build "$tv")"
+    # DRA v6 刷入链路: pwned DFU -> primepwn 发送解包裸 iBSS -> idevicerestore。
+    # 目标 build 已从固件文件名解析，不重复联网查询。
+    [[ -n "$tb2" ]] || tb2="$(resolve_build "$tv")"
     mkdir -p work/pwnibss
     (
         cd work/pwnibss || exit 1
@@ -755,28 +896,41 @@ cmd_restore() {
     ) || err "pwnediBSS 制作失败"
     [[ -s work/pwnibss/pwnediBSS ]] || err "pwnediBSS 不存在"
 
-    log "请将设备进入 pwned DFU (用你的 Arduino checkm8-a5 工具 pwn 设备) ..."
-    log "若设备已在陈旧的 pwned DFU 会话, 请先强制重启 (电源+Home 10秒) 再重新 DFU+pwn ..."
-    # 护栏: 先等旧会话消失, 再等新 PWND 出现, 保证 primepwn 拿到新鲜会话
-    if [[ $DRADOWN_SKIP_GUARD != 1 ]] && "$BIN/irecovery" -q 2>/dev/null | grep -qi '^PWND'; then
-        log "检测到已有 pwn 会话, 等待其消失 (重新 DFU+pwn) ..."
-        local waited_s=0
-        while [[ $waited_s -lt 300 ]]; do
-            "$BIN/irecovery" -q 2>/dev/null | grep -qi '^PWND' || break
-            sleep 2; waited_s=$((waited_s+2))
-        done
+    ui_stage 3 '连接设备'
+    local pwned="$("$BIN/irecovery" -q 2>/dev/null | grep -i '^PWND' | cut -c7-)"
+    if [[ -n "$pwned" ]]; then
+        echo '已检测到设备已准备好，正在继续。'
+    else
+        echo '请现在操作设备:'
+        echo '  1. 让 iPhone 进入 DFU 模式（屏幕保持全黑）'
+        echo '  2. 用 Arduino/Pico checkm8-a5 工具完成 pwn'
+        echo '  3. pwn 成功后保持数据线连接，不要再操作设备'
+        echo
+        printf '等待 Arduino pwn'
     fi
-    log "等待 pwned DFU (最长 10 分钟) ..."
-    local waited=0 pwned=""
+    local waited=0 tick=0
     while [[ $waited -lt 600 ]]; do
-        pwned="$("$BIN/irecovery" -q 2>/dev/null | grep -i '^PWND' | cut -c7-)"
+        pwned="$($BIN/irecovery -q 2>/dev/null | grep -i '^PWND' | cut -c7-)"
         [[ -n "$pwned" ]] && break
-        sleep 2; waited=$((waited+2))
+        sleep 2; waited=$((waited+2)); tick=$((tick+2))
+        if [[ $tick -ge 10 ]]; then
+            printf '  已等待 %02d:%02d（最多 10:00）\n' "$((waited/60))" "$((waited%60))"
+            printf '等待 Arduino pwn'
+            tick=0
+        fi
     done
-    [[ -z "$pwned" ]] && err "超时: 未检测到 pwned DFU 设备"
-    log "检测到 pwned DFU ($pwned), 发送 pwnediBSS ..."
-    "$BIN/primepwn" work/pwnibss/pwnediBSS || err "primepwn 发送失败: 设备可能未正确进入 PWNED DFU, 请重新 pwn 后重试"
+    printf '\n'
+    [[ -z "$pwned" ]] && err "10 分钟内未检测到 pwn。请重新进入 DFU 后重试。"
+    log "已检测到设备，正在继续 ..."
+    if [[ $DRADOWN_GUIDED == 1 ]]; then
+        ui_stage 4 '刷入 iOS'
+        "$BIN/primepwn" work/pwnibss/pwnediBSS >"$DIR/logs/pwn-${tv}-${tb2}.log" 2>&1 \
+            || { ui_failure '准备设备' "$DIR/logs/pwn-${tv}-${tb2}.log"; err '设备准备失败，请重新进入 DFU 后重试'; }
+    else
+        "$BIN/primepwn" work/pwnibss/pwnediBSS || err "primepwn 发送失败: 设备可能未正确进入 PWNED DFU, 请重新 pwn 后重试"
+    fi
     sleep 1
+    [[ $DRADOWN_GUIDED == 1 ]] && printf '  正在连接刷机环境，请保持数据线连接...\n'
     log "等待设备以补丁版 iBSS 进入恢复模式 ..."
     local waited3=0 srtg="iBoot"
     while [[ $waited3 -lt 30 ]]; do
@@ -791,9 +945,17 @@ cmd_restore() {
     fi
     # 自动重试: 其它设备的 usbmuxd 事件/USB 枚举竞态可能导致 restore 模式连接失败 (254)
     local attempt ret
+    local restore_log="$DIR/logs/restore-${tv}-${tb2}.log"
+    mkdir -p "$DIR/logs"
+    : > "$restore_log"
     for attempt in 1 2 3 4 5; do
         [[ $attempt -gt 1 ]] && { warn "第 $attempt/5 次尝试 ..."; sleep 5; }
-        "$BIN/idevicerestore" -ew "$custom"
+        if [[ $DRADOWN_GUIDED == 1 ]]; then
+            printf '  正在刷入 iOS %s（请不要断开数据线）...\n' "$tv"
+            "$BIN/idevicerestore" -ew "$custom" >>"$restore_log" 2>&1
+        else
+            "$BIN/idevicerestore" -ew "$custom"
+        fi
         ret=$?
         [[ $ret -eq 0 ]] && break
         [[ $ret -ne 254 && $ret -ne 255 ]] && break
@@ -806,11 +968,16 @@ cmd_restore() {
     done
     echo
     if [[ $ret -eq 0 ]]; then
-        log "刷入流程结束。设备重启时 DRA exploit 会自动触发 (boot-partition=2)"
-        log "如设备卡在恢复模式: 重启一次即可; 如需关闭 exploit, 可清空 NVRAM (boot-partition)"
+        if [[ $DRADOWN_GUIDED == 1 ]]; then
+            ui_success "$tv"
+        else
+            log "刷入流程结束。设备重启时 DRA exploit 会自动触发 (boot-partition=2)"
+            log "如设备卡在恢复模式: 重启一次即可; 如需关闭 exploit, 可清空 NVRAM (boot-partition)"
+        fi
     else
-        warn "idevicerestore 返回 $ret, 请检查上方日志"
-        warn "若在等待 apple.com 验证时报错属正常 (TSS 已禁用), 关注设备端行为"
+        local restore_log="$DIR/logs/restore-${tv}-${tb2}.log"
+        ui_failure '刷入设备' "$restore_log"
+        warn "详细工具输出已保存到: $restore_log"
     fi
 }
 
@@ -824,81 +991,126 @@ cmd_auto() {
     acquire_lock
     local tv="${1:-}"
     [[ -z "$tv" ]] && err "用法: $0 auto <目标版本>"
-    local tb
-    tb="$(resolve_build "$tv")" || err "无法解析 $tv 的 build 号 (网络问题)"
-    local auto_ipsw="$DIR/${DEV}_${tv}_${tb}_CustomP6.ipsw"
-    if [[ ! -s "$auto_ipsw" ]]; then
-        log "[auto 1/2] 构建目标固件 ..."
-        cmd_ipsw "$tv"
-        [[ -s "$auto_ipsw" ]] || err "构建后未找到 $auto_ipsw"
+    local tb auto_ipsw
+    # 先复用已有目标固件；只有缺少时才访问网络解析 build
+    auto_ipsw="$(ls "$DIR/${DEV}_${tv}_"*_CustomP6.ipsw 2>/dev/null | head -1)"
+    if [[ -s "$auto_ipsw" ]]; then
+        log "已找到目标固件: $(basename "$auto_ipsw")"
     else
-        log "复用已构建固件: $auto_ipsw"
+        tb="$(resolve_build "$tv")" || err "无法解析 $tv 的 build 号 (网络问题)"
+        auto_ipsw="$DIR/${DEV}_${tv}_${tb}_CustomP6.ipsw"
+        log "正在创建目标固件..."
+        DRADOWN_GUIDED=1 cmd_ipsw "$tv"
+        [[ -s "$auto_ipsw" ]] || err "构建后未找到目标固件"
     fi
-    log "[auto 2/2] 刷入流程启动。请随时将设备进 DFU 并用 Arduino pwn, 脚本会自动检测并继续 ..."
-    DRADOWN_YES=1 cmd_restore "$auto_ipsw"
+    log "正在准备刷入，请按提示完成 DFU 和 Arduino pwn..."
+    if [[ $DRADOWN_CONFIRMED == 1 ]]; then
+        DRADOWN_GUIDED=1 DRADOWN_CONFIRMED=1 cmd_restore "$auto_ipsw"
+    else
+        DRADOWN_GUIDED=1 cmd_restore "$auto_ipsw"
+    fi
+}
+
+# ---------- 新手向导 ----------
+cmd_choose_target() {
+    ui_title '选择目标系统'
+    echo '目标系统 = 刷完后 iPhone 要运行的 iOS 版本。'
+    echo '基础版本 6.1.3 由工具自动准备，不需要选择。'
+    echo
+    echo '  [1] iOS 5.1.1  （蜂窝/基带可能不可用）'
+    echo '  [2] iOS 6.1.3'
+    echo '  [3] iOS 7.1.2'
+    echo '  [4] iOS 8.4.1'
+    echo '  [5] iOS 9.3.5'
+    echo '  [6] 输入其他版本'
+    echo '  [0] 返回'
+    printf '\n请选择: '
+    local choice target
+    read -r choice || return 1
+    case "$choice" in
+        1) target='5.1.1';;
+        2) target='6.1.3';;
+        3) target='7.1.2';;
+        4) target='8.4.1';;
+        5) target='9.3.5';;
+        6) printf '输入目标版本（例如 7.1.2）: '; read -r target || return 1;;
+        0) return 1;;
+        *) echo '请输入列表中的编号。'; ui_pause; return 1;;
+    esac
+    [[ -n "$target" ]] || return 1
+    cmd_guided_restore "$target"
+}
+
+cmd_guided_restore() {
+    local target="$1"
+    ui_title '准备刷机'
+    echo "目标系统: iOS $target"
+    echo "基础版本: iOS $BASE_VERS（自动准备，仅用于刷机引导）"
+    echo "刷完后设备运行: iOS $target"
+    echo
+    echo '这次操作会清除 iPhone 上的全部内容。'
+    case "$target" in
+        5.*) echo '重要提示: iOS 5 可能导致蜂窝/基带不可用。';;
+    esac
+    echo
+    echo '开始前请确认:'
+    echo '  • 已备份重要数据'
+    echo '  • 已准备 Arduino/Pico checkm8-a5 工具'
+    echo '  • 设备会先进入 DFU，再由你完成 pwn'
+    echo
+    printf '输入“继续”开始，直接按回车返回: '
+    local answer
+    read -r answer || return 0
+    [[ "$answer" == '继续' || "$answer" == 'YES' || "$answer" == 'yes' ]] || return 0
+    DRADOWN_GUIDED=1 DRADOWN_CONFIRMED=1 cmd_auto "$target"
 }
 
 # ---------- 新手菜单 (双击启动默认进入) ----------
 cmd_menu() {
     while true; do
-        echo
-        echo "==============================================="
-        echo "   iPhone 4S 免SHSH全版本刷写工具 (DRA v6)"
-        echo "==============================================="
-        echo "  概念: 目标版本 = 你想刷成的系统 (5.0-9.3.6 任选)"
-        echo "        基础版本 = iOS $BASE_VERS (刷机引导链, 自动处理)"
-        echo "  前提: 每次刷机前需用 Arduino 工具对设备做一次 pwn"
-        echo "-----------------------------------------------"
-        echo "  操作流程:"
-        echo "   [1] 插上设备, 先检测 (看是否被识别)"
-        echo "   [2] 选择并构建目标版本固件 (首次含下载, 较慢)"
-        echo "   [3] 设备进DFU + Arduino pwn 后, 刷入已构建固件"
-        echo "   [4] 懒人模式: 输入目标版本, 一条龙构建+刷入"
-        echo "-----------------------------------------------"
-        echo "  其他: [5] 重新下载工具  [0] 退出"
-        echo "==============================================="
-        printf "请输入编号后回车: "
+        ui_title 'iPhone 4S 刷机工具'
+        echo '  [1] 开始刷机（推荐）'
+        echo '  [2] 只构建固件'
+        echo '  [3] 查看设备状态'
+        echo '  [4] 工具检查与修复'
+        echo '  [H] 使用帮助 / 已知风险'
+        echo '  [0] 退出'
+        printf '\n请选择: '
         local choice
-        read -r choice || { echo; exit 0; }   # stdin EOF 时退出菜单 (防止死循环)
+        read -r choice || { echo; exit 0; }
         case "$choice" in
-            1) cmd_info; echo; echo "(按回车返回菜单)"; read -r;;
-            2) echo "构建固件 = 准备刷机包。需先选择【目标版本】(要刷成的系统):"
-               echo "  可选: 5.1.1 / 6.1.3 / 7.1.2 / 8.4.1 / 9.3.5 / 9.3.6 ..."
-               printf "目标版本: "; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; echo "(按回车返回菜单)"; read -r;;
-            3) cmd_restore_menu;;
-            4) echo "一键刷机: 输入【目标版本】(要刷成的系统)"
-               echo "  例: 想刷成 7.1.2 就输入 7.1.2 (基础版本 6.1.3 会自动处理)"
-               printf "目标版本: "; read -r v; [[ -n "$v" ]] && cmd_auto "$v"; echo "(按回车返回菜单)"; read -r;;
-            5) cmd_setup; echo "(按回车返回菜单)"; read -r;;
+            1) cmd_choose_target;;
+            2) ui_title '构建固件'; echo '只需要选择目标系统；基础版本会自动处理。'; printf '目标版本: '; read -r v; [[ -n "$v" ]] && cmd_ipsw "$v"; ui_pause;;
+            3) cmd_info; ui_pause;;
+            4) cmd_setup; ui_pause;;
+            h|H) ui_help;;
             0|q|Q) exit 0;;
-            *) echo "无效输入";;
+            *) echo '请输入 1、2、3、4、H 或 0。'; sleep 1;;
         esac
     done
 }
 
-# 刷入菜单: 自动列出固件, 单个直接选, 多个编号选择
+# ---------- 已构建固件选择（高级/兼容入口） ----------
 cmd_restore_menu() {
     local all_ipsvs=("$DIR"/${DEV}_*_CustomP6.ipsw)
     local list=() i
     for i in "${all_ipsvs[@]}"; do [[ -s "$i" ]] && list+=("$i"); done
     if [[ ${#list[@]} -eq 0 ]]; then
-        echo "还没有已构建的固件。请先选 [2] 构建固件。"
+        echo '还没有已构建的固件，请使用“开始刷机”或“只构建固件”。'
         return
     fi
-    if [[ ${#list[@]} -eq 1 ]]; then
-        cmd_restore "${list[0]}"
-        return
-    fi
-    echo "请选择要刷入的固件:"
+    echo '请选择要安装的目标系统:'
     local n=1
     for f in "${list[@]}"; do echo "  [$n] $(basename "$f")"; n=$((n+1)); done
-    printf "输入编号: "
+    echo '  [0] 返回'
+    printf '请选择: '
     local pick
-    read -r pick
+    read -r pick || return
+    [[ "$pick" == 0 ]] && return
     if [[ "$pick" =~ ^[0-9]+$ && $pick -ge 1 && $pick -le ${#list[@]} ]]; then
         cmd_restore "${list[$((pick-1))]}"
     else
-        echo "无效选择"
+        echo '请输入列表中的编号。'
     fi
 }
 
