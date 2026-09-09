@@ -32,7 +32,7 @@ info_output="$(bash "$SCRIPT" info 2>/dev/null || true)"
 check "info prints detection header" contains "$info_output" "设备检测"
 check "info reports device state or absence" bash -c 'grep -q "当前系统\|未检测到设备\|模式:" <<< "$1"' _ "$info_output"
 
-restore_output="$(bash "$SCRIPT" restore 2>/dev/null || true)"
+restore_output="$(bash "$SCRIPT" restore 2>&1 || true)"
 check "restore never guesses a firmware silently" bash -c 'grep -q "必须明确指定\|没有找到已构建" <<< "$1"' _ "$restore_output"
 
 check "auto path does not bypass confirmation" bash -c '! grep -q "DRADOWN_YES=1 cmd_restore" "$1"' _ "$SCRIPT"
